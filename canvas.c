@@ -38,6 +38,7 @@
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_seat.h>
@@ -96,6 +97,34 @@ struct canvas_server {
     struct wl_listener cursor_button;
     struct wl_listener cursor_axis;
     struct wl_listener cursor_frame;
+
+    // touchpad gestures (forwarded to clients + bindable to actions)
+    struct wlr_pointer_gestures_v1 *pointer_gestures;
+    struct wl_listener swipe_begin;
+    struct wl_listener swipe_update;
+    struct wl_listener swipe_end;
+    struct wl_listener pinch_begin;
+    struct wl_listener pinch_update;
+    struct wl_listener pinch_end;
+    struct wl_listener hold_begin;
+    struct wl_listener hold_end;
+    // accumulated motion between gesture begin/end
+    struct {
+        bool swipe_active;
+        uint32_t swipe_fingers;
+        double swipe_dx, swipe_dy;
+        // continuous action while the swipe is in progress
+        // (two_finger/three_finger config: pan camera or drag window)
+        TouchpadSwipeAction swipe_mode;
+        struct canvas_toplevel *swipe_target; // drag target in move mode
+        double swipe_cont_x, swipe_cont_y; // sub-pixel remainder
+        bool pinch_active;
+        uint32_t pinch_fingers;
+        double pinch_dx, pinch_dy;
+        double pinch_scale;
+        bool hold_active;
+        uint32_t hold_fingers;
+    } touch;
 
     struct wlr_seat *seat;
     struct wl_listener new_input;
@@ -1131,6 +1160,10 @@ static void focus_camera_on_next_window_in_configured_order(
 static void forget_toplevel(struct canvas_server *server,
         struct canvas_toplevel *toplevel) {
     remove_window_from_usage_history(toplevel);
+    if (server->touch.swipe_target == toplevel) {
+        server->touch.swipe_target = NULL;
+        server->touch.swipe_mode = touchpad_none;
+    }
     if (server->grabbed_toplevel == toplevel) {
         server->grabbed_toplevel = NULL;
         server->cursor_mode = CANVAS_CURSOR_PASSTHROUGH;
@@ -1321,29 +1354,51 @@ static void process_cursor_resize(struct canvas_server *server) {
     wlr_xdg_toplevel_set_size(t->xdg_toplevel, new_width, new_height);
 }
 
+/* Shift every window by (dx, dy) px and track it as camera motion.
+ * Shared by Meta+right drag and the two/three-finger swipe pan. */
+static void pan_camera_by(struct canvas_server *server, int dx, int dy) {
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+    struct canvas_toplevel *t;
+    wl_list_for_each(t, &server->toplevels, link) {
+        t->x += dx;
+        t->y += dy;
+        wlr_scene_node_set_position(&t->scene_tree->node, t->x, t->y);
+    }
+    if (server->anim.active) {
+        for (int i = 0; i < server->anim.n; i++) {
+            if (server->anim.clients[i]) {
+                server->anim.start_x[i] += dx;
+                server->anim.start_y[i] += dy;
+            }
+        }
+    }
+    server->camera_x += dx;
+    server->camera_y += dy;
+}
+
+/* Drag one window by (dx, dy) px. No-op if it is gone. */
+static void move_toplevel_by(struct canvas_server *server,
+        struct canvas_toplevel *t, int dx, int dy) {
+    if (!t || find_managed_client_index(server, t) < 0) {
+        return;
+    }
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+    t->x += dx;
+    t->y += dy;
+    wlr_scene_node_set_position(&t->scene_tree->node, t->x, t->y);
+}
+
 static void process_cursor_camera(struct canvas_server *server) {
     double dx = server->cursor->x - server->grab_x;
     double dy = server->cursor->y - server->grab_y;
     if (dx == 0 && dy == 0) {
         return;
     }
-    int idx = (int)dx, idy = (int)dy;
-    struct canvas_toplevel *t;
-    wl_list_for_each(t, &server->toplevels, link) {
-        t->x += idx;
-        t->y += idy;
-        wlr_scene_node_set_position(&t->scene_tree->node, t->x, t->y);
-    }
-    if (server->anim.active) {
-        for (int i = 0; i < server->anim.n; i++) {
-            if (server->anim.clients[i]) {
-                server->anim.start_x[i] += idx;
-                server->anim.start_y[i] += idy;
-            }
-        }
-    }
-    server->camera_x += idx;
-    server->camera_y += idy;
+    pan_camera_by(server, (int)dx, (int)dy);
     server->grab_x = server->cursor->x;
     server->grab_y = server->cursor->y;
 }
@@ -1745,6 +1800,269 @@ static void server_cursor_frame(struct wl_listener *listener, void *data) {
         wl_container_of(listener, server, cursor_frame);
     (void)data;
     wlr_seat_pointer_notify_frame(server->seat);
+}
+
+
+// touchpad gestures: two/three/four-finger swipe, pinch, hold
+
+/* Defined further down (runtime config reload); prototyped here so gesture
+ * dispatch can trigger it like the keybind path does. */
+static void server_reload_config(struct canvas_server *server);
+
+/* Run one gesture binding's action. Same action set as keybinds. */
+static void run_gesture_action(struct canvas_server *server,
+        const GestureBinding *b) {
+    if (b->action_type == action_run_command) {
+        run_configured_shell_command(b->command_to_run);
+    } else if (b->action_type == action_close_focused_window) {
+        close_focused_toplevel(server);
+    } else if (b->action_type == action_quit_window_manager) {
+        wl_display_terminate(server->wl_display);
+    } else if (b->action_type == action_focus_next_window) {
+        focus_camera_on_next_window_in_configured_order(server, 1);
+    } else if (b->action_type == action_focus_previous_window) {
+        focus_camera_on_next_window_in_configured_order(server, 0);
+    } else if (b->action_type == action_reload_config) {
+        server_reload_config(server);
+    }
+}
+
+/* Match a finished gesture against [[gesture]] binds. First match wins,
+ * like keybinds. A bind with direction "any"/"none" matches any direction. */
+static void handle_touchpad_gesture(struct canvas_server *server,
+        GestureType type, unsigned int fingers, GestureDirection dir) {
+    if (type != gesture_hold && dir == gesture_dir_none) {
+        return; // below threshold: ignore
+    }
+    unsigned int cleaned = 0;
+    struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+    if (kb) {
+        cleaned = clean_modifier_state(wlr_keyboard_get_modifiers(kb));
+    }
+    for (unsigned int i = 0; i < server->config.gesturebinding_count; i++) {
+        const GestureBinding *b = &server->config.gesturebindings[i];
+        if (b->gesture_type != type || b->fingers != fingers) {
+            continue;
+        }
+        if (b->direction != gesture_dir_none && b->direction != dir) {
+            continue;
+        }
+        if (b->modifier_mask != cleaned) {
+            continue;
+        }
+        run_gesture_action(server, b);
+        return;
+    }
+}
+
+static void server_swipe_begin(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, swipe_begin);
+    struct wlr_pointer_swipe_begin_event *event = data;
+    server->touch.swipe_active = true;
+    server->touch.swipe_fingers = event->fingers;
+    server->touch.swipe_dx = 0;
+    server->touch.swipe_dy = 0;
+    // Continuous action for this finger count (two_finger/three_finger).
+    server->touch.swipe_mode = touchpad_none;
+    server->touch.swipe_target = NULL;
+    server->touch.swipe_cont_x = 0;
+    server->touch.swipe_cont_y = 0;
+    TouchpadSwipeAction want = touchpad_none;
+    if (event->fingers == 2) {
+        want = server->config.touchpad_two_finger;
+    } else if (event->fingers == 3) {
+        want = server->config.touchpad_three_finger;
+    }
+    if (want == touchpad_move) {
+        // Drag the window under the cursor (focused first, like a grab).
+        double sx, sy;
+        struct wlr_surface *surface = NULL;
+        struct canvas_toplevel *t = desktop_toplevel_at(server,
+            server->cursor->x, server->cursor->y,
+            &surface, &sx, &sy, NULL);
+        if (!t) {
+            t = server->focused_toplevel;
+        }
+        if (t && find_managed_client_index(server, t) >= 0) {
+            focus_toplevel(server, t);
+            server->touch.swipe_mode = touchpad_move;
+            server->touch.swipe_target = t;
+        }
+    } else if (want == touchpad_camera) {
+        server->touch.swipe_mode = touchpad_camera;
+    }
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_swipe_begin(server->pointer_gestures,
+            server->seat, event->time_msec, event->fingers);
+    }
+}
+
+static void server_swipe_update(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, swipe_update);
+    struct wlr_pointer_swipe_update_event *event = data;
+    if (server->touch.swipe_active) {
+        server->touch.swipe_dx += event->dx;
+        server->touch.swipe_dy += event->dy;
+        // Direct manipulation: pan the canvas / drag the window live.
+        // Fractions accumulate so slow swipes still move pixel by pixel.
+        if (server->touch.swipe_mode == touchpad_camera ||
+                server->touch.swipe_mode == touchpad_move) {
+            if (server->touch.swipe_mode == touchpad_move &&
+                    (!server->touch.swipe_target ||
+                        find_managed_client_index(server,
+                            server->touch.swipe_target) < 0)) {
+                server->touch.swipe_mode = touchpad_none;
+                server->touch.swipe_target = NULL;
+            } else {
+                server->touch.swipe_cont_x += event->dx;
+                server->touch.swipe_cont_y += event->dy;
+                int ix = (int)server->touch.swipe_cont_x;
+                int iy = (int)server->touch.swipe_cont_y;
+                if (ix != 0 || iy != 0) {
+                    if (server->touch.swipe_mode == touchpad_camera) {
+                        pan_camera_by(server, ix, iy);
+                    } else {
+                        move_toplevel_by(server,
+                            server->touch.swipe_target, ix, iy);
+                    }
+                    server->touch.swipe_cont_x -= ix;
+                    server->touch.swipe_cont_y -= iy;
+                }
+            }
+        }
+    }
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_swipe_update(server->pointer_gestures,
+            server->seat, event->time_msec, event->dx, event->dy);
+    }
+}
+
+static void server_swipe_end(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, swipe_end);
+    struct wlr_pointer_swipe_end_event *event = data;
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_swipe_end(server->pointer_gestures,
+            server->seat, event->time_msec, event->cancelled);
+    }
+    if (!event->cancelled && server->touch.swipe_active) {
+        double dx = server->touch.swipe_dx;
+        double dy = server->touch.swipe_dy;
+        double thresh = server->config.touchpad_swipe_threshold;
+        if (thresh < 0) {
+            thresh = 0;
+        }
+        double adx = fabs(dx), ady = fabs(dy);
+        if (adx >= thresh || ady >= thresh) {
+            GestureDirection dir = (adx > ady) ?
+                (dx > 0 ? gesture_dir_right : gesture_dir_left) :
+                (dy > 0 ? gesture_dir_down : gesture_dir_up);
+            handle_touchpad_gesture(server, gesture_swipe,
+                server->touch.swipe_fingers, dir);
+        }
+    }
+    server->touch.swipe_active = false;
+    server->touch.swipe_mode = touchpad_none;
+    server->touch.swipe_target = NULL;
+}
+
+static void server_pinch_begin(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, pinch_begin);
+    struct wlr_pointer_pinch_begin_event *event = data;
+    server->touch.pinch_active = true;
+    server->touch.pinch_fingers = event->fingers;
+    server->touch.pinch_dx = 0;
+    server->touch.pinch_dy = 0;
+    server->touch.pinch_scale = 1.0;
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_pinch_begin(server->pointer_gestures,
+            server->seat, event->time_msec, event->fingers);
+    }
+}
+
+static void server_pinch_update(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, pinch_update);
+    struct wlr_pointer_pinch_update_event *event = data;
+    if (server->touch.pinch_active) {
+        server->touch.pinch_dx += event->dx;
+        server->touch.pinch_dy += event->dy;
+        server->touch.pinch_scale = event->scale;
+    }
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_pinch_update(server->pointer_gestures,
+            server->seat, event->time_msec, event->dx, event->dy,
+            event->scale, event->rotation);
+    }
+}
+
+static void server_pinch_end(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, pinch_end);
+    struct wlr_pointer_pinch_end_event *event = data;
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_pinch_end(server->pointer_gestures,
+            server->seat, event->time_msec, event->cancelled);
+    }
+    if (!event->cancelled && server->touch.pinch_active) {
+        double zoom = fabs(server->touch.pinch_scale - 1.0);
+        double pinch_thresh = server->config.touchpad_pinch_threshold;
+        if (pinch_thresh < 0) {
+            pinch_thresh = 0;
+        }
+        GestureDirection dir = gesture_dir_none;
+        if (zoom >= pinch_thresh && server->touch.pinch_scale != 1.0) {
+            dir = server->touch.pinch_scale > 1.0 ?
+                gesture_dir_out : gesture_dir_in;
+        } else {
+            // Mostly a pan: reuse the swipe threshold + directions.
+            double dx = server->touch.pinch_dx;
+            double dy = server->touch.pinch_dy;
+            double swipe_thresh = server->config.touchpad_swipe_threshold;
+            if (swipe_thresh < 0) {
+                swipe_thresh = 0;
+            }
+            double adx = fabs(dx), ady = fabs(dy);
+            if (adx >= swipe_thresh || ady >= swipe_thresh) {
+                dir = (adx > ady) ?
+                    (dx > 0 ? gesture_dir_right : gesture_dir_left) :
+                    (dy > 0 ? gesture_dir_down : gesture_dir_up);
+            }
+        }
+        handle_touchpad_gesture(server, gesture_pinch,
+            server->touch.pinch_fingers, dir);
+    }
+    server->touch.pinch_active = false;
+}
+
+static void server_hold_begin(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, hold_begin);
+    struct wlr_pointer_hold_begin_event *event = data;
+    server->touch.hold_active = true;
+    server->touch.hold_fingers = event->fingers;
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_hold_begin(server->pointer_gestures,
+            server->seat, event->time_msec, event->fingers);
+    }
+}
+
+static void server_hold_end(struct wl_listener *listener, void *data) {
+    struct canvas_server *server =
+        wl_container_of(listener, server, hold_end);
+    struct wlr_pointer_hold_end_event *event = data;
+    if (server->pointer_gestures) {
+        wlr_pointer_gestures_v1_send_hold_end(server->pointer_gestures,
+            server->seat, event->time_msec, event->cancelled);
+    }
+    if (!event->cancelled && server->touch.hold_active) {
+        handle_touchpad_gesture(server, gesture_hold,
+            server->touch.hold_fingers, gesture_dir_none);
+    }
+    server->touch.hold_active = false;
 }
 
 
@@ -2594,6 +2912,27 @@ int main(int argc, char *argv[]) {
     server.cursor_frame.notify = server_cursor_frame;
     wl_signal_add(&server.cursor->events.frame, &server.cursor_frame);
 
+    // Touchpad gestures: forwarded to clients (browsers get swipe/pinch)
+    // and matched against [[gesture]] binds for compositor actions.
+    server.pointer_gestures =
+        wlr_pointer_gestures_v1_create(server.wl_display);
+    server.swipe_begin.notify = server_swipe_begin;
+    wl_signal_add(&server.cursor->events.swipe_begin, &server.swipe_begin);
+    server.swipe_update.notify = server_swipe_update;
+    wl_signal_add(&server.cursor->events.swipe_update, &server.swipe_update);
+    server.swipe_end.notify = server_swipe_end;
+    wl_signal_add(&server.cursor->events.swipe_end, &server.swipe_end);
+    server.pinch_begin.notify = server_pinch_begin;
+    wl_signal_add(&server.cursor->events.pinch_begin, &server.pinch_begin);
+    server.pinch_update.notify = server_pinch_update;
+    wl_signal_add(&server.cursor->events.pinch_update, &server.pinch_update);
+    server.pinch_end.notify = server_pinch_end;
+    wl_signal_add(&server.cursor->events.pinch_end, &server.pinch_end);
+    server.hold_begin.notify = server_hold_begin;
+    wl_signal_add(&server.cursor->events.hold_begin, &server.hold_begin);
+    server.hold_end.notify = server_hold_end;
+    wl_signal_add(&server.cursor->events.hold_end, &server.hold_end);
+
     wl_list_init(&server.keyboards);
     server.new_input.notify = server_new_input;
     wl_signal_add(&server.backend->events.new_input, &server.new_input);
@@ -2648,6 +2987,14 @@ int main(int argc, char *argv[]) {
     wl_list_remove(&server.cursor_button.link);
     wl_list_remove(&server.cursor_axis.link);
     wl_list_remove(&server.cursor_frame.link);
+    wl_list_remove(&server.swipe_begin.link);
+    wl_list_remove(&server.swipe_update.link);
+    wl_list_remove(&server.swipe_end.link);
+    wl_list_remove(&server.pinch_begin.link);
+    wl_list_remove(&server.pinch_update.link);
+    wl_list_remove(&server.pinch_end.link);
+    wl_list_remove(&server.hold_begin.link);
+    wl_list_remove(&server.hold_end.link);
     wl_list_remove(&server.new_input.link);
     wl_list_remove(&server.request_cursor.link);
     wl_list_remove(&server.pointer_focus_change.link);

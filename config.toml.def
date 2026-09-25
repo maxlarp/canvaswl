@@ -32,6 +32,8 @@ main_mod = "Mod4"
 resize_mod = "Mod1"
 # Mouse buttons: BTN_LEFT / BTN_RIGHT / BTN_MIDDLE / BTN_SIDE /
 # BTN_EXTRA / BTN_FORWARD / BTN_BACK / BTN_TASK, or raw integers.
+# Touchpad taps work here too: "two-finger" (= right click) and
+# "three-finger" (= middle click) are accepted as aliases.
 btn_focus = "BTN_LEFT"
 btn_move = "BTN_LEFT"
 btn_camera = "BTN_RIGHT"
@@ -41,6 +43,49 @@ btn_resize = "BTN_RIGHT"
 # Empty theme = default Xcursor theme.
 theme = ""
 size = 24
+
+[touchpad]
+# Continuous action while a swipe is in progress: camera = pan the
+# infinite canvas, move = drag the window under the cursor, none = off.
+# (Discrete [[gesture]] binds below still fire at the end of the swipe,
+# so set these to "none" if you only want the discrete binds.)
+# don't bother with two fingers because they are usually reported as scroll
+two_finger = "none"
+three_finger = "camera"
+# Minimum motion before a swipe/pinch counts as a gesture bind.
+swipe_threshold = 30
+pinch_threshold = 0.1
+
+# gestures: two/three/four-finger touchpad gestures bound to actions.
+# gesture = swipe | pinch | hold, fingers = 2/3/4,
+# direction = left | right | up | down (swipe, or pinch pan)
+#           | in | out (pinch zoom together/apart),
+# mod is optional (default: no modifier). Same actions as keybinds:
+# spawn | close | quit | focus_next | focus_prev | reload.
+[[gesture]]
+gesture = "swipe"
+fingers = 3
+direction = "left"
+action = "focus_next"
+
+[[gesture]]
+gesture = "swipe"
+fingers = 3
+direction = "right"
+action = "focus_prev"
+
+# [[gesture]]
+# gesture = "pinch"
+# fingers = 2
+# direction = "out"
+# action = "spawn"
+# cmd = "alacritty"
+
+# [[gesture]]
+# gesture = "hold"
+# fingers = 3
+# action = "spawn"
+# cmd = "fuzzel"
 
 # keybinds: mod = modifier combo, key = xkb keysym name
 # (e.g. Return, q, d, Tab, E, F1, space), action = spawn | close |

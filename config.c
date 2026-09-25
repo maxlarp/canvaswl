@@ -54,6 +54,14 @@ void config_init_defaults(canvas_config *cfg) {
     cfg->cursor_theme_name = NULL;
     cfg->cursor_size = 24;
 
+    cfg->touchpad_swipe_threshold = 30.0;
+    cfg->touchpad_pinch_threshold = 0.1;
+    cfg->touchpad_two_finger = touchpad_camera;
+    cfg->touchpad_three_finger = touchpad_move;
+
+    cfg->gesturebindings = NULL;
+    cfg->gesturebinding_count = 0;
+
     cfg->keybinding_count = 6;
     cfg->keybindings = calloc(cfg->keybinding_count, sizeof(KeyBinding));
     if (cfg->keybindings) {
@@ -106,6 +114,14 @@ void config_free_contents(canvas_config *cfg) {
     }
     free(cfg->cursor_theme_name);
     cfg->cursor_theme_name = NULL;
+    if (cfg->gesturebindings) {
+        for (unsigned int i = 0; i < cfg->gesturebinding_count; i++) {
+            free(cfg->gesturebindings[i].command_to_run);
+        }
+        free(cfg->gesturebindings);
+        cfg->gesturebindings = NULL;
+        cfg->gesturebinding_count = 0;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -217,6 +233,18 @@ int config_parse_mouse_button(const char *s, unsigned int *out) {
         code = BTN_BACK;
     } else if (!strcmp(n, "task")) {
         code = BTN_TASK;
+    } else if (!strcmp(n, "two-finger") || !strcmp(n, "two_finger") ||
+            !strcmp(n, "twofinger") || !strcmp(n, "2-finger") ||
+            !strcmp(n, "2_finger") || !strcmp(n, "doubletap") ||
+            !strcmp(n, "double-tap") || !strcmp(n, "double_tap")) {
+        /* libinput clickfinger: a 2-finger tap/click arrives as BTN_RIGHT. */
+        code = BTN_RIGHT;
+    } else if (!strcmp(n, "three-finger") || !strcmp(n, "three_finger") ||
+            !strcmp(n, "threefinger") || !strcmp(n, "3-finger") ||
+            !strcmp(n, "3_finger") || !strcmp(n, "tripletap") ||
+            !strcmp(n, "triple-tap") || !strcmp(n, "triple_tap")) {
+        /* libinput clickfinger: a 3-finger tap/click arrives as BTN_MIDDLE. */
+        code = BTN_MIDDLE;
     } else {
         free(t);
         return -1;
@@ -326,6 +354,97 @@ int config_parse_action(const char *s, KeyActionType *out) {
     return 0;
 }
 
+int config_parse_gesture_type(const char *s, GestureType *out) {
+    if (!out || str_is_empty(s)) {
+        return -1;
+    }
+    char *t = strdup(s);
+    if (!t) {
+        return -1;
+    }
+    str_tolower_inplace(t);
+    GestureType g;
+    if (!strcmp(t, "swipe")) {
+        g = gesture_swipe;
+    } else if (!strcmp(t, "pinch") || !strcmp(t, "zoom")) {
+        g = gesture_pinch;
+    } else if (!strcmp(t, "hold")) {
+        g = gesture_hold;
+    } else {
+        free(t);
+        return -1;
+    }
+    free(t);
+    *out = g;
+    return 0;
+}
+
+int config_parse_gesture_direction(const char *s, GestureDirection *out) {
+    if (!out || str_is_empty(s)) {
+        return -1;
+    }
+    char *t = strdup(s);
+    if (!t) {
+        return -1;
+    }
+    str_tolower_inplace(t);
+    GestureDirection d;
+    if (!strcmp(t, "left")) {
+        d = gesture_dir_left;
+    } else if (!strcmp(t, "right")) {
+        d = gesture_dir_right;
+    } else if (!strcmp(t, "up")) {
+        d = gesture_dir_up;
+    } else if (!strcmp(t, "down")) {
+        d = gesture_dir_down;
+    } else if (!strcmp(t, "in") || !strcmp(t, "zoom-out") ||
+            !strcmp(t, "zoom_out") || !strcmp(t, "pinch-in") ||
+            !strcmp(t, "pinch_in")) {
+        d = gesture_dir_in;
+    } else if (!strcmp(t, "out") || !strcmp(t, "zoom-in") ||
+            !strcmp(t, "zoom_in") || !strcmp(t, "pinch-out") ||
+            !strcmp(t, "pinch_out")) {
+        d = gesture_dir_out;
+    } else if (!strcmp(t, "none") || !strcmp(t, "any")) {
+        d = gesture_dir_none;
+    } else {
+        free(t);
+        return -1;
+    }
+    free(t);
+    *out = d;
+    return 0;
+}
+
+int config_parse_touchpad_swipe_action(const char *s, TouchpadSwipeAction *out) {
+    if (!out) {
+        return -1;
+    }
+    if (str_is_empty(s)) {
+        *out = touchpad_none;
+        return 0;
+    }
+    char *t = strdup(s);
+    if (!t) {
+        return -1;
+    }
+    str_tolower_inplace(t);
+    TouchpadSwipeAction a;
+    if (!strcmp(t, "camera") || !strcmp(t, "pan")) {
+        a = touchpad_camera;
+    } else if (!strcmp(t, "move") || !strcmp(t, "window")) {
+        a = touchpad_move;
+    } else if (!strcmp(t, "none") || !strcmp(t, "off")) {
+        a = touchpad_none;
+    } else {
+        free(t);
+        return -1;
+    }
+    free(t);
+    *out = a;
+    return 0;
+}
+
 static xkb_keysym_t parse_keysym(const char *s) {
     if (str_is_empty(s)) {
         return XKB_KEY_NoSymbol;
@@ -362,6 +481,20 @@ static int get_int(toml_table_t *tab, const char *key, int64_t *out) {
     toml_datum_t b = toml_bool_in(tab, key);
     if (b.ok) {
         *out = b.u.b ? 1 : 0;
+        return 0;
+    }
+    return -1;
+}
+
+static int get_double(toml_table_t *tab, const char *key, double *out) {
+    toml_datum_t d = toml_double_in(tab, key);
+    if (d.ok) {
+        *out = d.u.d;
+        return 0;
+    }
+    int64_t i;
+    if (get_int(tab, key, &i) == 0) {
+        *out = (double)i;
         return 0;
     }
     return -1;
@@ -535,6 +668,7 @@ int config_load(const char *path, canvas_config *cfg, char *errbuf,
 
     int64_t iv;
     int bv;
+    double dv;
     unsigned long cv;
     unsigned int mv;
     char *sv = NULL;
@@ -704,6 +838,47 @@ int config_load(const char *path, canvas_config *cfg, char *errbuf,
         }
     }
 
+    t = toml_table_in(root, "touchpad");
+    if (t) {
+        if (get_double(t, "swipe_threshold", &dv) == 0) {
+            if (dv < 0) {
+                fprintf(stderr, "canvas-wl: [touchpad] swipe_threshold < 0, keeping default\n");
+            } else {
+                cfg->touchpad_swipe_threshold = dv;
+            }
+        } else if (key_present(t, "swipe_threshold")) {
+            fprintf(stderr, "canvas-wl: [touchpad] swipe_threshold: expected number >= 0, keeping default\n");
+        }
+        if (get_double(t, "pinch_threshold", &dv) == 0) {
+            if (dv < 0) {
+                fprintf(stderr, "canvas-wl: [touchpad] pinch_threshold < 0, keeping default\n");
+            } else {
+                cfg->touchpad_pinch_threshold = dv;
+            }
+        } else if (key_present(t, "pinch_threshold")) {
+            fprintf(stderr, "canvas-wl: [touchpad] pinch_threshold: expected number >= 0, keeping default\n");
+        }
+        const char *swipe_keys[] = { "two_finger", "three_finger" };
+        TouchpadSwipeAction *swipe_outs[] = { &cfg->touchpad_two_finger,
+            &cfg->touchpad_three_finger };
+        for (size_t si = 0; si < sizeof(swipe_keys) / sizeof(swipe_keys[0]); si++) {
+            char *as = NULL;
+            if (get_string(t, swipe_keys[si], &as) == 0) {
+                TouchpadSwipeAction a;
+                if (config_parse_touchpad_swipe_action(as, &a) == 0) {
+                    *swipe_outs[si] = a;
+                } else {
+                    fprintf(stderr, "canvas-wl: [touchpad] %s: unknown action \"%s\" (want camera|move|none), keeping default\n",
+                        swipe_keys[si], as);
+                }
+                free(as);
+            } else if (key_present(t, swipe_keys[si])) {
+                fprintf(stderr, "canvas-wl: [touchpad] %s: expected string (camera|move|none), keeping default\n",
+                    swipe_keys[si]);
+            }
+        }
+    }
+
     t = toml_table_in(root, "cursor");
     if (t) {
         if (get_string(t, "theme", &sv) == 0) {
@@ -828,6 +1003,130 @@ int config_load(const char *path, canvas_config *cfg, char *errbuf,
         cfg->keybinding_count = count;
     }
 
+    toml_array_t *gs = toml_array_in(root, "gesture");
+    if (gs) {
+        int n = toml_array_nelem(gs);
+        GestureBinding *arr = NULL;
+        unsigned int count = 0;
+        if (n > 0) {
+            arr = calloc((size_t)n, sizeof(GestureBinding));
+            if (!arr) {
+                snprintf(errbuf, errbufsz, "out of memory");
+                toml_free(root);
+                return -1;
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            toml_table_t *e = toml_table_at(gs, i);
+            if (!e) {
+                fprintf(stderr, "canvas-wl: gesture #%d: not a table, skipping\n", i);
+                continue;
+            }
+            /* gesture type: swipe | pinch | hold (or type = ... alias). */
+            GestureType gt = gesture_swipe;
+            char *gstr = NULL;
+            if (get_string(e, "gesture", &gstr) != 0) {
+                get_string(e, "type", &gstr);
+            }
+            if (!gstr || config_parse_gesture_type(gstr, &gt) != 0) {
+                if (gstr) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: bad gesture \"%s\", skipping\n", i, gstr);
+                } else {
+                    fprintf(stderr, "canvas-wl: gesture #%d: missing gesture (want swipe|pinch|hold), skipping\n", i);
+                }
+                free(gstr);
+                continue;
+            }
+            free(gstr);
+            /* fingers: 2, 3, 4 (usually). */
+            int64_t fingers = 3;
+            if (get_int(e, "fingers", &fingers) != 0) {
+                if (key_present(e, "fingers")) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: bad fingers (want 2, 3 or 4), skipping\n", i);
+                    continue;
+                }
+                fingers = 3;
+            }
+            if (fingers < 2 || fingers > 5) {
+                fprintf(stderr, "canvas-wl: gesture #%d: fingers must be 2..5, skipping\n", i);
+                continue;
+            }
+            /* direction: required for swipe/pinch, ignored for hold. */
+            GestureDirection gd = gesture_dir_none;
+            char *dstr = NULL;
+            if (get_string(e, "direction", &dstr) != 0) {
+                get_string(e, "dir", &dstr);
+            }
+            if (gt != gesture_hold) {
+                if (!dstr || config_parse_gesture_direction(dstr, &gd) != 0 ||
+                        gd == gesture_dir_none) {
+                    if (dstr) {
+                        fprintf(stderr, "canvas-wl: gesture #%d: bad direction \"%s\", skipping\n", i, dstr);
+                    } else {
+                        fprintf(stderr, "canvas-wl: gesture #%d: missing direction (want left|right|up|down|in|out), skipping\n", i);
+                    }
+                    free(dstr);
+                    continue;
+                }
+            } else if (dstr) {
+                if (config_parse_gesture_direction(dstr, &gd) != 0) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: bad direction \"%s\", skipping\n", i, dstr);
+                    free(dstr);
+                    continue;
+                }
+            }
+            free(dstr);
+            /* mod is optional: missing/empty/"none" means no modifier. */
+            unsigned int mods = 0;
+            if (get_mods(e, "mod", &mods) != 0) {
+                if (get_mods(e, "modifier", &mods) != 0) {
+                    if (key_present(e, "mod") || key_present(e, "modifier")) {
+                        fprintf(stderr, "canvas-wl: gesture #%d: bad mod, skipping\n", i);
+                        continue;
+                    }
+                    mods = 0;
+                }
+            }
+            char *as = NULL;
+            KeyActionType at;
+            if (get_string(e, "action", &as) != 0 ||
+                    config_parse_action(as, &at) != 0) {
+                if (as) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: bad action \"%s\", skipping\n", i, as);
+                } else if (key_present(e, "action")) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: bad action (expected string), skipping\n", i);
+                } else {
+                    fprintf(stderr, "canvas-wl: gesture #%d: missing action, skipping\n", i);
+                }
+                free(as);
+                continue;
+            }
+            free(as);
+            char *cmd = NULL;
+            if (at == action_run_command) {
+                if (get_string(e, "cmd", &cmd) != 0) {
+                    get_string(e, "command", &cmd);
+                }
+                if (!cmd) {
+                    fprintf(stderr, "canvas-wl: gesture #%d: spawn without cmd\n", i);
+                }
+            }
+            arr[count].gesture_type = gt;
+            arr[count].fingers = (unsigned int)fingers;
+            arr[count].direction = gd;
+            arr[count].modifier_mask = mods;
+            arr[count].action_type = at;
+            arr[count].command_to_run = cmd;
+            count++;
+        }
+        for (unsigned int i = 0; i < cfg->gesturebinding_count; i++) {
+            free(cfg->gesturebindings[i].command_to_run);
+        }
+        free(cfg->gesturebindings);
+        cfg->gesturebindings = arr;
+        cfg->gesturebinding_count = count;
+    }
+
     t = toml_table_in(root, "startup");
     if (t) {
         toml_array_t *cmds = toml_array_in(t, "commands");
@@ -943,7 +1242,8 @@ int config_validate(const char *path, char *report, size_t reportsz) {
             }
             if (strcmp(k, "window") && strcmp(k, "focus") &&
                     strcmp(k, "input") && strcmp(k, "cursor") &&
-                    strcmp(k, "startup") && strcmp(k, "keybind")) {
+                    strcmp(k, "touchpad") && strcmp(k, "startup") &&
+                    strcmp(k, "keybind") && strcmp(k, "gesture")) {
                 diag_add(&d, "  [root]: unknown table/array '%s'\n", k);
             }
         }
@@ -951,6 +1251,7 @@ int config_validate(const char *path, char *report, size_t reportsz) {
 
     int64_t iv;
     int bv;
+    double dv;
     unsigned long cv;
     unsigned int mv;
     char *sv = NULL;
@@ -1099,6 +1400,40 @@ int config_validate(const char *path, char *report, size_t reportsz) {
         }
     }
 
+    t = toml_table_in(root, "touchpad");
+    if (t) {
+        static const char *const known[] = { "swipe_threshold",
+            "pinch_threshold", "two_finger", "three_finger" };
+        validate_unknown_keys(t, "[touchpad]", known,
+            sizeof(known) / sizeof(known[0]), path, &d);
+        if (key_present(t, "swipe_threshold")) {
+            if (get_double(t, "swipe_threshold", &dv) != 0 || dv < 0) {
+                diag_value_suffix(t, "swipe_threshold", vs, sizeof(vs));
+                diag_add(&d, "  [touchpad] swipe_threshold: expected number >= 0%s\n", vs);
+            }
+        }
+        if (key_present(t, "pinch_threshold")) {
+            if (get_double(t, "pinch_threshold", &dv) != 0 || dv < 0) {
+                diag_value_suffix(t, "pinch_threshold", vs, sizeof(vs));
+                diag_add(&d, "  [touchpad] pinch_threshold: expected number >= 0%s\n", vs);
+            }
+        }
+        const char *swipe_keys[] = { "two_finger", "three_finger" };
+        for (size_t si = 0; si < sizeof(swipe_keys) / sizeof(swipe_keys[0]); si++) {
+            if (key_present(t, swipe_keys[si])) {
+                char *as = NULL;
+                TouchpadSwipeAction a;
+                if (get_string(t, swipe_keys[si], &as) != 0 ||
+                        config_parse_touchpad_swipe_action(as, &a) != 0) {
+                    diag_value_suffix(t, swipe_keys[si], vs, sizeof(vs));
+                    diag_add(&d, "  [touchpad] %s: expected camera|move|none%s\n",
+                        swipe_keys[si], vs);
+                }
+                free(as);
+            }
+        }
+    }
+
     int valid_keybinds = 0;
     toml_array_t *kb = toml_array_in(root, "keybind");
     if (kb) {
@@ -1223,6 +1558,141 @@ int config_validate(const char *path, char *report, size_t reportsz) {
         free(seen_syms);
     }
 
+    int valid_gestures = 0;
+    toml_array_t *ga = toml_array_in(root, "gesture");
+    if (ga) {
+        int n = toml_array_nelem(ga);
+        static const char *const known[] = { "gesture", "type", "fingers",
+            "direction", "dir", "mod", "modifier", "action", "cmd",
+            "command" };
+        for (int i = 0; i < n; i++) {
+            toml_table_t *e = toml_table_at(ga, i);
+            if (!e) {
+                diag_add(&d, "  gesture #%d: not a table, skipped\n", i);
+                continue;
+            }
+            {
+                char sec[64];
+                snprintf(sec, sizeof(sec), "gesture #%d", i);
+                validate_unknown_keys(e, sec, known,
+                    sizeof(known) / sizeof(known[0]), path, &d);
+            }
+            int ok_entry = 1;
+            GestureType gt = gesture_swipe;
+            int have_type = 0;
+            char *gstr = NULL;
+            if (get_string(e, "gesture", &gstr) != 0) {
+                get_string(e, "type", &gstr);
+            }
+            if (gstr) {
+                if (config_parse_gesture_type(gstr, &gt) != 0) {
+                    diag_add(&d, "  gesture #%d: unknown gesture \"%s\" (want swipe|pinch|hold)\n",
+                        i, gstr);
+                    ok_entry = 0;
+                } else {
+                    have_type = 1;
+                }
+                free(gstr);
+            } else {
+                diag_add(&d, "  gesture #%d: missing gesture (want swipe|pinch|hold)\n", i);
+                ok_entry = 0;
+            }
+            int64_t fingers = 0;
+            if (get_int(e, "fingers", &fingers) != 0) {
+                if (key_present(e, "fingers")) {
+                    diag_value_suffix(e, "fingers", vs, sizeof(vs));
+                    diag_add(&d, "  gesture #%d: bad fingers%s (want 2, 3 or 4)\n",
+                        i, vs);
+                } else {
+                    diag_add(&d, "  gesture #%d: missing fingers (want 2, 3 or 4)\n", i);
+                }
+                ok_entry = 0;
+            } else if (fingers < 2 || fingers > 5) {
+                diag_add(&d, "  gesture #%d: fingers must be 2..5 (got %lld)\n",
+                    i, (long long)fingers);
+                ok_entry = 0;
+            }
+            GestureDirection gd = gesture_dir_none;
+            char *dstr = NULL;
+            if (get_string(e, "direction", &dstr) != 0) {
+                get_string(e, "dir", &dstr);
+            }
+            if (have_type && gt == gesture_hold) {
+                if (dstr) {
+                    if (config_parse_gesture_direction(dstr, &gd) != 0) {
+                        diag_add(&d, "  gesture #%d: unknown direction \"%s\"\n", i, dstr);
+                        ok_entry = 0;
+                    }
+                    free(dstr);
+                }
+            } else {
+                if (dstr) {
+                    if (config_parse_gesture_direction(dstr, &gd) != 0 ||
+                            gd == gesture_dir_none) {
+                        diag_add(&d, "  gesture #%d: unknown direction \"%s\" (want left|right|up|down|in|out)\n",
+                            i, dstr);
+                        ok_entry = 0;
+                    }
+                    free(dstr);
+                } else {
+                    diag_add(&d, "  gesture #%d: missing direction (want left|right|up|down|in|out)\n", i);
+                    ok_entry = 0;
+                }
+            }
+            unsigned int mods = 0;
+            int have_mods = (get_mods(e, "mod", &mods) == 0);
+            if (!have_mods) {
+                have_mods = (get_mods(e, "modifier", &mods) == 0);
+            }
+            if (!have_mods) {
+                if (key_present(e, "mod") || key_present(e, "modifier")) {
+                    diag_add(&d, "  gesture #%d: bad mod (want e.g. \"Mod4\", \"none\", or \"\" for none)\n", i);
+                    ok_entry = 0;
+                } else {
+                    mods = 0;
+                }
+            }
+            KeyActionType at = action_run_command;
+            int have_action = 0;
+            char *as = NULL;
+            if (get_string(e, "action", &as) == 0) {
+                if (config_parse_action(as, &at) != 0) {
+                    diag_add(&d, "  gesture #%d: unknown action \"%s\" (want spawn|close|quit|focus_next|focus_prev|reload)\n",
+                        i, as);
+                    ok_entry = 0;
+                } else {
+                    have_action = 1;
+                }
+                free(as);
+            } else if (key_present(e, "action")) {
+                diag_add(&d, "  gesture #%d: bad action (want string like \"spawn\")\n", i);
+                ok_entry = 0;
+            } else {
+                diag_add(&d, "  gesture #%d: missing action (want spawn|close|quit|focus_next|focus_prev|reload)\n", i);
+                ok_entry = 0;
+            }
+            if (have_action && at == action_run_command) {
+                char *cmd = NULL;
+                if (get_string(e, "cmd", &cmd) != 0) {
+                    get_string(e, "command", &cmd);
+                }
+                if (!cmd) {
+                    diag_add(&d, "  gesture #%d: spawn action needs cmd (e.g. cmd = \"alacritty\")\n", i);
+                } else {
+                    free(cmd);
+                }
+            } else if (have_action) {
+                if (key_present(e, "cmd") || key_present(e, "command")) {
+                    diag_add(&d, "  gesture #%d: note: cmd is ignored for non-spawn actions\n", i);
+                }
+            }
+            if (ok_entry) {
+                valid_gestures++;
+            }
+            (void)mods;
+        }
+    }
+
     t = toml_table_in(root, "startup");
     int startup_count = 0;
     if (t) {
@@ -1256,8 +1726,9 @@ int config_validate(const char *path, char *report, size_t reportsz) {
     if (issues == 0) {
         size_t used = d.len;
         snprintf(report + used, reportsz > used ? reportsz - used : 0,
-            "  OK: valid (%d keybind%s, %d startup command%s)\n", valid_keybinds,
-            valid_keybinds == 1 ? "" : "s", startup_count,
+            "  OK: valid (%d keybind%s, %d gesture%s, %d startup command%s)\n", valid_keybinds,
+            valid_keybinds == 1 ? "" : "s", valid_gestures,
+            valid_gestures == 1 ? "" : "s", startup_count,
             startup_count == 1 ? "" : "s");
     } else {
         size_t used = d.len;

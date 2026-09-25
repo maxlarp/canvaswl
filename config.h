@@ -42,6 +42,41 @@ typedef struct {
     char *command_to_run;         /* owned; only for action_run_command */
 } KeyBinding;
 
+/* Touchpad gesture bindings ([[gesture]]). Same actions as keybinds,
+ * triggered by swipe/pinch/hold instead of a key press. */
+typedef enum {
+    gesture_swipe, /* fingers sliding together (2/3/4-finger swipe) */
+    gesture_pinch, /* fingers moving apart/together or panning (zoom) */
+    gesture_hold   /* fingers held still (no direction) */
+} GestureType;
+
+typedef enum {
+    gesture_dir_none,  /* hold, or any direction (wildcard when matching) */
+    gesture_dir_left,
+    gesture_dir_right,
+    gesture_dir_up,
+    gesture_dir_down,
+    gesture_dir_in,    /* pinch fingers together (zoom out) */
+    gesture_dir_out    /* pinch fingers apart (zoom in) */
+} GestureDirection;
+
+typedef struct {
+    GestureType gesture_type;     /* swipe / pinch / hold */
+    unsigned int fingers;         /* 2, 3, 4 (touchpad finger count) */
+    GestureDirection direction;   /* swipe/pinch direction, none for hold */
+    unsigned int modifier_mask;   /* optional kbd mods held, usually 0 */
+    KeyActionType action_type;    /* what to do when triggered */
+    char *command_to_run;         /* owned; only for action_run_command */
+} GestureBinding;
+
+/* Continuous action while a swipe with N fingers is in progress
+ * (independent from the discrete [[gesture]] binds that fire at the end). */
+typedef enum {
+    touchpad_none,   /* no continuous action */
+    touchpad_camera, /* pan the infinite canvas with the swipe */
+    touchpad_move    /* drag the window under the cursor with the swipe */
+} TouchpadSwipeAction;
+
 typedef struct {
     /* [window] */
     int window_border_width;
@@ -75,6 +110,16 @@ typedef struct {
     /* [[keybind]] */
     KeyBinding *keybindings; /* owned array */
     unsigned int keybinding_count;
+
+    /* [touchpad] */
+    double touchpad_swipe_threshold; /* px of swipe motion before firing */
+    double touchpad_pinch_threshold; /* |scale - 1.0| before in/out fires */
+    TouchpadSwipeAction touchpad_two_finger;   /* continuous 2-finger action */
+    TouchpadSwipeAction touchpad_three_finger; /* continuous 3-finger action */
+
+    /* [[gesture]] */
+    GestureBinding *gesturebindings; /* owned array */
+    unsigned int gesturebinding_count;
 
     /* [startup] */
     char **startup_commands; /* owned array of owned strings */
@@ -110,6 +155,9 @@ int config_write_default_file(const char *path, char *errbuf, size_t errbufsz);
  * config_parse_modifier_mask accepts "", "none"/"0" as no modifier (0). */
 int config_parse_modifier_mask(const char *s, unsigned int *out);
 int config_parse_mouse_button(const char *s, unsigned int *out);
+int config_parse_gesture_type(const char *s, GestureType *out);
+int config_parse_gesture_direction(const char *s, GestureDirection *out);
+int config_parse_touchpad_swipe_action(const char *s, TouchpadSwipeAction *out);
 int config_parse_color(const char *s, unsigned long *out);
 int config_parse_action(const char *s, KeyActionType *out);
 
