@@ -1,0 +1,5 @@
+# Build outputs
+canvas
+*.o
+# Generated at build time by wayland-scanner (see Makefile); only the .xml is source
+protocols/*-protocol.h

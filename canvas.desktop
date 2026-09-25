@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=canvas
+Comment=Infinite-canvas Wayland compositor (wlroots)
+Exec=/usr/local/bin/canvas
+TryExec=/usr/local/bin/canvas
+Type=Application
+DesktopNames=canvas
