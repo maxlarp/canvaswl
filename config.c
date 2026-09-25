@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <linux/input-event-codes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1313,100 +1314,103 @@ static int mkdir_p(const char *dir) {
     return 0;
 }
 
+/* Compile-time install prefix (set via -DCANVASWL_PREFIX="..." in the
+ * Makefile). Falls back to /usr/local when not defined (e.g. ad-hoc cc). */
+#ifndef CANVASWL_PREFIX
+#define CANVASWL_PREFIX "/usr/local"
+#endif
+
+/* Locate the shipped default template (config.toml.def). Search order:
+ *   1. $CANVASWL_TEMPLATE (explicit override, handy for testing)
+ *   2. <exe-dir>/config.toml.def (build tree / alongside binary)
+ *   3. <exe-dir>/../share/canvaswl/config.toml.def (relocated install)
+ *   4. CANVASWL_PREFIX/share/canvaswl/config.toml.def (compiled-in PREFIX)
+ *   5. /usr/local/share/canvaswl/config.toml.def
+ *   6. /usr/share/canvaswl/config.toml.def
+ *   7. ./config.toml.def (cwd, dev runs)
+ * Returns 0 and fills buf on success, -1 when nothing readable was found. */
+static int find_default_template(char *buf, size_t bufsz) {
+    const char *env = getenv("CANVASWL_TEMPLATE");
+    if (env && env[0] && access(env, R_OK) == 0) {
+        snprintf(buf, bufsz, "%s", env);
+        return 0;
+    }
+
+    /* exe-dir based candidates (Linux /proc/self/exe). */
+    char exe[PATH_MAX] = {0};
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n > 0) {
+        exe[n] = '\0';
+        char *slash = strrchr(exe, '/');
+        if (slash) {
+            *slash = '\0';
+            char cand[PATH_MAX];
+            snprintf(cand, sizeof(cand), "%s/config.toml.def", exe);
+            if (access(cand, R_OK) == 0) {
+                snprintf(buf, bufsz, "%s", cand);
+                return 0;
+            }
+            snprintf(cand, sizeof(cand),
+                "%s/../share/canvaswl/config.toml.def", exe);
+            if (access(cand, R_OK) == 0) {
+                snprintf(buf, bufsz, "%s", cand);
+                return 0;
+            }
+        }
+    }
+
+    static const char *const fixed[] = {
+        CANVASWL_PREFIX "/share/canvaswl/config.toml.def",
+        "/usr/local/share/canvaswl/config.toml.def",
+        "/usr/share/canvaswl/config.toml.def",
+        "./config.toml.def",
+    };
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) {
+        if (access(fixed[i], R_OK) == 0) {
+            snprintf(buf, bufsz, "%s", fixed[i]);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int copy_file_contents(FILE *src, FILE *dst, const char *srcname,
+        const char *dstname, char *errbuf, size_t errbufsz) {
+    char tmp[8192];
+    size_t r;
+    while ((r = fread(tmp, 1, sizeof(tmp), src)) > 0) {
+        if (fwrite(tmp, 1, r, dst) != r) {
+            if (errbuf && errbufsz) {
+                snprintf(errbuf, errbufsz, "cannot write %s: %s", dstname,
+                    strerror(errno));
+            }
+            return -1;
+        }
+    }
+    if (ferror(src)) {
+        if (errbuf && errbufsz) {
+            snprintf(errbuf, errbufsz, "cannot read %s: %s", srcname,
+                strerror(errno));
+        }
+        return -1;
+    }
+    return 0;
+}
+
 int config_write_default_file(const char *path, char *errbuf,
         size_t errbufsz) {
-    static const char *const def =
-        "# canvas-wl config (TOML). Reload live with your reload keybind\n"
-        "# (default: Mod4+Shift+R) or `kill -HUP <pid>`.\n"
-        "# Restart is NOT needed; startup.commands only run at launch.\n"
-        "\n"
-        "[window]\n"
-        "border_width = 2\n"
-        "# Colors accept TOML hex ints or \"#rrggbb\" strings.\n"
-        "border_active = 0x00AAFF\n"
-        "border_inactive = 0x444444\n"
-        "# Fallback size for windows that don't pick their own.\n"
-        "# (Per-app last size in $XDG_CACHE_HOME/canvaswl/window_sizes wins.)\n"
-        "default_width = 800\n"
-        "default_height = 600\n"
-        "# Extra offset on top of exact view-centering.\n"
-        "offset_x = 0\n"
-        "offset_y = 0\n"
-        "min_width = 1\n"
-        "min_height = 1\n"
-        "\n"
-        "[focus]\n"
-        "# true = cycle most-recently-used (Alt-Tab style), false = nearest.\n"
-        "recent_order = true\n"
-        "anim_duration_ms = 250\n"
-        "anim_fps = 60\n"
-        "# 0 = ignore presses mid-animation, 1 = one coalesced bonus hop,\n"
-        "# 2 = every press retargets the running animation.\n"
-        "interruption_mode = 1\n"
-        "\n"
-        "[input]\n"
-        "# Modifiers: Shift, Ctrl/Control, Alt/Mod1, Super/Logo/Mod4/Windows,\n"
-        "# combined with + or |, e.g. \"Mod4+Shift\". Or a raw integer.\n"
-        "main_mod = \"Mod4\"\n"
-        "resize_mod = \"Mod1\"\n"
-        "# Mouse buttons: BTN_LEFT / BTN_RIGHT / BTN_MIDDLE / BTN_SIDE /\n"
-        "# BTN_EXTRA / BTN_FORWARD / BTN_BACK / BTN_TASK, or raw integers.\n"
-        "btn_focus = \"BTN_LEFT\"\n"
-        "btn_move = \"BTN_LEFT\"\n"
-        "btn_camera = \"BTN_RIGHT\"\n"
-        "btn_resize = \"BTN_RIGHT\"\n"
-        "\n"
-        "[cursor]\n"
-        "# Empty theme = default Xcursor theme.\n"
-        "theme = \"\"\n"
-        "size = 24\n"
-        "\n"
-        "# keybinds: mod = modifier combo, key = xkb keysym name\n"
-        "# (e.g. Return, q, d, Tab, E, F1, space), action = spawn | close |\n"
-        "# quit | focus_next | focus_prev | reload. cmd only used by spawn.\n"
-        "# mod may be omitted, \"\", or \"none\" for a bare key with no modifier.\n"
-        "# Validate with: canvas validate [-c path]\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4\"\n"
-        "key = \"Return\"\n"
-        "action = \"spawn\"\n"
-        "cmd = \"alacritty\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4\"\n"
-        "key = \"d\"\n"
-        "action = \"spawn\"\n"
-        "cmd = \"fuzzel\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4\"\n"
-        "key = \"q\"\n"
-        "action = \"close\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4\"\n"
-        "key = \"Tab\"\n"
-        "action = \"focus_next\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4+Shift\"\n"
-        "key = \"Tab\"\n"
-        "action = \"focus_prev\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4+Shift\"\n"
-        "key = \"e\"\n"
-        "action = \"quit\"\n"
-        "\n"
-        "[[keybind]]\n"
-        "mod = \"Mod4+Shift\"\n"
-        "key = \"r\"\n"
-        "action = \"reload\"\n"
-        "\n"
-        "[startup]\n"
-        "# Shell commands run once at compositor start (Wayland-native only;\n"
-        "# picom/feh are X-only). NOT re-run on config reload.\n"
-        "commands = [ \"swaybg -i ~/wallpaper.jpg &\" ]\n";
+    char template_path[PATH_MAX] = {0};
+    if (find_default_template(template_path, sizeof(template_path)) != 0) {
+        if (errbuf && errbufsz) {
+            snprintf(errbuf, errbufsz,
+                "no template found (looked for config.toml.def next to "
+                "the binary, in %s/share/canvaswl/, "
+                "/usr/local/share/canvaswl/, /usr/share/canvaswl/, ./, "
+                "or $CANVASWL_TEMPLATE)",
+                CANVASWL_PREFIX);
+        }
+        return -1;
+    }
 
     /* mkdir -p the parent dir. */
     char dir[4096];
@@ -1423,23 +1427,32 @@ int config_write_default_file(const char *path, char *errbuf,
         }
     }
 
+    FILE *src = fopen(template_path, "r");
+    if (!src) {
+        if (errbuf && errbufsz) {
+            snprintf(errbuf, errbufsz, "cannot read %s: %s", template_path,
+                strerror(errno));
+        }
+        return -1;
+    }
     FILE *fp = fopen(path, "w");
     if (!fp) {
         if (errbuf && errbufsz) {
             snprintf(errbuf, errbufsz, "cannot write %s: %s", path,
                 strerror(errno));
         }
+        fclose(src);
         return -1;
     }
-    size_t n = strlen(def);
-    if (fwrite(def, 1, n, fp) != n) {
-        if (errbuf && errbufsz) {
+    int rc = copy_file_contents(src, fp, template_path, path, errbuf,
+        errbufsz);
+    fclose(src);
+    if (fclose(fp) != 0) {
+        if (errbuf && errbufsz && rc == 0) {
             snprintf(errbuf, errbufsz, "cannot write %s: %s", path,
                 strerror(errno));
         }
-        fclose(fp);
         return -1;
     }
-    fclose(fp);
-    return 0;
+    return rc;
 }

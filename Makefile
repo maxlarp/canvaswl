@@ -1,6 +1,7 @@
 CC       ?= cc
 CFLAGS   ?= -Wall -Wextra -O2
 CFLAGS   += -DWLR_USE_UNSTABLE -Iprotocols $(shell pkg-config --cflags wlroots-0.20 wayland-server xkbcommon)
+CFLAGS   += -DCANVASWL_PREFIX=\"$(PREFIX)\"
 LDLIBS   := $(shell pkg-config --libs wlroots-0.20 wayland-server xkbcommon) -lm
 WAYLAND_SCANNER ?= $(shell pkg-config --variable=wayland_scanner wayland-scanner 2>/dev/null || echo wayland-scanner)
 
@@ -8,6 +9,8 @@ PREFIX      ?= /usr/local
 BINDIR      := $(PREFIX)/bin
 SHAREDIR    := $(PREFIX)/share
 WSESSIONDIR := $(SHAREDIR)/wayland-sessions
+TEMPLATEDIR := $(SHAREDIR)/canvaswl
+TEMPLATE    := config.toml.def
 
 TARGET   := canvas
 SRCS     := canvas.c config.c toml.c
@@ -37,6 +40,7 @@ toml.o: toml.c toml.h
 
 install: all
 	install -Dm755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
+	install -Dm644 $(TEMPLATE) $(DESTDIR)$(TEMPLATEDIR)/$(TEMPLATE)
 	install -dm755 $(DESTDIR)$(WSESSIONDIR)
 	sed -e 's|^Exec=.*|Exec=$(BINDIR)/$(TARGET)|' \
 	    -e 's|^TryExec=.*|TryExec=$(BINDIR)/$(TARGET)|' \
@@ -45,6 +49,7 @@ install: all
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
+	rm -f $(DESTDIR)$(TEMPLATEDIR)/$(TEMPLATE)
 	rm -f $(DESTDIR)$(WSESSIONDIR)/$(TARGET).desktop
 
 clean:

@@ -99,6 +99,9 @@ void config_free_contents(canvas_config *cfg);
 int config_default_path(char *buf, size_t bufsz);
 
 /* Write a commented default config file to path (mkdir -p's the parent).
+ * The contents are copied from the shipped config.toml.def template
+ * (see find order in config.c: $CANVASWL_TEMPLATE, next to the binary,
+ * $PREFIX/share/canvaswl/, /usr/local/share, /usr/share, ./).
  * Returns 0 on success, -1 on error with errbuf filled. */
 int config_write_default_file(const char *path, char *errbuf, size_t errbufsz);
 

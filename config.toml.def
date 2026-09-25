@@ -1,0 +1,89 @@
+# canvas-wl config (TOML). Reload live with your reload keybind
+# (default: Mod4+Shift+R) or `kill -HUP <pid>`.
+
+[window]
+border_width = 2
+# Colors accept TOML hex ints or "#rrggbb" strings.
+border_active = 0x00AAFF
+border_inactive = 0x444444
+# Fallback size for windows that don't pick their own.
+# (Per-app last size in $XDG_CACHE_HOME/canvaswl/window_sizes wins.)
+default_width = 800
+default_height = 600
+# Extra offset on top of exact view-centering.
+offset_x = 0
+offset_y = 0
+min_width = 1
+min_height = 1
+
+[focus]
+# true = cycle most-recently-used (Alt-Tab style), false = nearest.
+recent_order = true
+anim_duration_ms = 250
+anim_fps = 60
+# 0 = ignore presses mid-animation, 1 = one coalesced bonus hop,
+# 2 = every press retargets the running animation.
+interruption_mode = 1
+
+[input]
+# Modifiers: Shift, Ctrl/Control, Alt/Mod1, Super/Logo/Mod4/Windows,
+# combined with + or |, e.g. "Mod4+Shift". Or a raw integer.
+main_mod = "Mod4"
+resize_mod = "Mod1"
+# Mouse buttons: BTN_LEFT / BTN_RIGHT / BTN_MIDDLE / BTN_SIDE /
+# BTN_EXTRA / BTN_FORWARD / BTN_BACK / BTN_TASK, or raw integers.
+btn_focus = "BTN_LEFT"
+btn_move = "BTN_LEFT"
+btn_camera = "BTN_RIGHT"
+btn_resize = "BTN_RIGHT"
+
+[cursor]
+# Empty theme = default Xcursor theme.
+theme = ""
+size = 24
+
+# keybinds: mod = modifier combo, key = xkb keysym name
+# (e.g. Return, q, d, Tab, E, F1, space), action = spawn | close |
+# quit | focus_next | focus_prev | reload. cmd only used by spawn.
+# mod may be omitted, "", or "none" for a bare key with no modifier.
+# Validate with: canvas validate [-c path]
+[[keybind]]
+mod = "Mod4"
+key = "Return"
+action = "spawn"
+cmd = "alacritty"
+
+[[keybind]]
+mod = "Mod4"
+key = "d"
+action = "spawn"
+cmd = "fuzzel"
+
+[[keybind]]
+mod = "Mod4"
+key = "q"
+action = "close"
+
+[[keybind]]
+mod = "Mod4"
+key = "Tab"
+action = "focus_next"
+
+[[keybind]]
+mod = "Mod4+Shift"
+key = "Tab"
+action = "focus_prev"
+
+[[keybind]]
+mod = "Mod4+Shift"
+key = "e"
+action = "quit"
+
+[[keybind]]
+mod = "Mod4+Shift"
+key = "r"
+action = "reload"
+
+[startup]
+# Restart is NOT needed; startup.commands only run at launch.
+commands = [ "swaybg -i ~/wallpaper.jpg &" ]
